@@ -1,3 +1,4 @@
+import pytz
 import os, time, math, base64
 import datetime as dt
 from dataclasses import dataclass
@@ -35,7 +36,8 @@ def yf_symbol(ticker: str) -> str:
 
 # ── Utilities ──────────────────────────────────────────────────────────────────
 def zdt_now():
-    return dt.datetime.now(dt.timezone.utc).astimezone(dt.ZoneInfo(TZ))
+    return dt.datetime.now(pytz.timezone(TZ))
+
 
 def parse_hhmm(s: str) -> dt.time:
     hh, mm = s.split(":")
