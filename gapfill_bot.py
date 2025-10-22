@@ -10,7 +10,7 @@ import pytz
 from dotenv import load_dotenv
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Config - US STOCKS VERSION
+# Config - US + LSE STOCKS VERSION
 # ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 
@@ -23,13 +23,11 @@ UNIVERSE = [t.strip().upper() for t in os.getenv("TICKERS", "TSLA,GME,AMC,COIN,A
 TOTAL_BUDGET = float(os.getenv("TOTAL_BUDGET_GBP", "2000"))
 PER_TRADE_RISK = float(os.getenv("PER_TRADE_RISK_PCT", "0.005"))
 
-# Gap + filters - WIDENED for better hit rate
-MIN_GAP = float(os.getenv("MIN_GAP_DOWN", "-0.0015"))  # -0.15%
-MAX_GAP = float(os.getenv("MAX_GAP_DOWN", "-0.008"))   # -0.8%
-RSI_MAX = float(os.getenv("RSI_MAX", "45"))
+MIN_GAP = float(os.getenv("MIN_GAP_DOWN", "-0.005"))
+MAX_GAP = float(os.getenv("MAX_GAP_DOWN", "-0.030"))
+RSI_MAX = float(os.getenv("RSI_MAX", "50"))
 SLIPPAGE_BP = float(os.getenv("SLIPPAGE_BP", "5")) / 10000.0
 
-# Market clock (US Eastern Time)
 TZ = os.getenv("TIMEZONE", "America/New_York")
 OPEN_HHMM = os.getenv("US_OPEN_HHMM", "09:30")
 CLOSE_HHMM = os.getenv("US_CLOSE_HHMM", "16:00")
@@ -41,7 +39,6 @@ def parse_hhmm(s: str) -> dt.time:
 OPEN_T = parse_hhmm(OPEN_HHMM)
 CLOSE_T = parse_hhmm(CLOSE_HHMM)
 
-# Cache of positions we opened today: ticker -> qty
 positions: dict[str, int] = {}
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -70,7 +67,7 @@ def wait_until_open():
         time.sleep(sleep_s)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Trading 212 API wrapper with backoff
+# Trading 212 API wrapper
 # ──────────────────────────────────────────────────────────────────────────────
 def auth_header() -> dict:
     assert API_KEY and API_SECRET, "Missing T212 API creds in .env"
@@ -121,22 +118,22 @@ def market_sell_all(ticker: str, qty: float):
     return r.json()
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Market data + signals - US STOCKS (NO .L SUFFIX)
+# Market data - MIXED US + LSE STOCKS
 # ──────────────────────────────────────────────────────────────────────────────
 def yf_symbol(ticker: str) -> str:
-    # US stocks don't need suffix - use ticker as-is
+    LSE_TICKERS = {'RR', 'EQQQ', 'VUSA', 'VUAG', 'ISF', 'VUKE', 'VMID'}
+    if ticker.upper() in LSE_TICKERS:
+        return f"{ticker}.L"
     return ticker
 
 def prev_close_and_rsi14(yf_sym: str):
-    """Get previous close and RSI with better data handling"""
     try:
         df = yf.download(yf_sym, period="3mo", interval="1d", auto_adjust=False, progress=False)
         if df.empty or len(df) < 20:
             return None, None
         
-        # Remove today if it's incomplete (avoids stale data issues)
         now_hour = zdt_now().hour
-        if now_hour < 17:  # Before market close + settlement
+        if now_hour < 17:
             df = df[:-1]
         
         if len(df) < 15:
@@ -145,12 +142,14 @@ def prev_close_and_rsi14(yf_sym: str):
         close = df["Close"]
         prev_close = float(close.iloc[-1])
         
-        # RSI calculation
         delta = close.diff()
-        up = np.where(delta > 0, delta, 0.0)
-        down = np.where(delta < 0, -delta, 0.0)
-        roll_up = pd.Series(up).rolling(14).mean()
-        roll_down = pd.Series(down).rolling(14).mean().replace(0, np.nan)
+        up = delta.copy()
+        down = delta.copy()
+        up[up < 0] = 0.0
+        down[down > 0] = 0.0
+        down = abs(down)
+        roll_up = up.rolling(14).mean()
+        roll_down = down.rolling(14).mean().replace(0, np.nan)
         rs = roll_up / roll_down
         rsi = 100 - (100 / (1 + rs))
         rsi_yday = float(rsi.iloc[-1])
@@ -161,15 +160,10 @@ def prev_close_and_rsi14(yf_sym: str):
         return None, None
 
 def get_actual_open_price(yf_sym: str, max_wait_minutes: int = 5) -> float | None:
-    """
-    Get the ACTUAL opening price from first candle.
-    Waits up to max_wait_minutes for data to appear.
-    """
     for attempt in range(max_wait_minutes):
         try:
             df = yf.download(yf_sym, period="1d", interval="1m", progress=False)
             if not df.empty and len(df) >= 1:
-                # Get the OPEN of the first candle (the actual auction price)
                 open_price = float(df["Open"].iloc[0])
                 print(f"[DATA] {yf_sym} open price: ${open_price:.2f} (from first candle)")
                 return open_price
@@ -213,7 +207,6 @@ def make_plan(t212_ticker: str, budget_each: float) -> Plan | None:
     
     print(f"[DATA] {t212_ticker}: Prev Close = ${prev_close:.2f}, RSI = {rsi_yday:.2f}")
     
-    # Wait for opening auction to settle and get actual open price
     open_px = get_actual_open_price(yfs, max_wait_minutes=3)
     
     if not open_px:
@@ -223,19 +216,16 @@ def make_plan(t212_ticker: str, budget_each: float) -> Plan | None:
     gap_pct = (open_px - prev_close) / prev_close
     print(f"[GAP] {t212_ticker}: {gap_pct*100:.3f}% (Open: ${open_px:.2f})")
     
-    # Check gap range
     if not (MAX_GAP <= gap_pct <= MIN_GAP):
         print(f"[SKIP] {t212_ticker}: Gap {gap_pct*100:.3f}% outside range [{MAX_GAP*100:.2f}%, {MIN_GAP*100:.2f}%]")
         return None
     
-    # Check RSI
     if rsi_yday > RSI_MAX:
         print(f"[SKIP] {t212_ticker}: RSI {rsi_yday:.2f} > {RSI_MAX}")
         return None
 
     print(f"[PASS] {t212_ticker}: ✓ Gap and RSI filters passed!")
     
-    # Calculate entry, target, stop
     target = prev_close * (1 - SLIPPAGE_BP)
     stop = open_px * (1 - min(0.006, abs(gap_pct) * 0.6))
 
@@ -257,7 +247,7 @@ def make_plan(t212_ticker: str, budget_each: float) -> Plan | None:
 # ──────────────────────────────────────────────────────────────────────────────
 def run_day():
     print("\n" + "="*60)
-    print(f"[BOOT] US Gap-fill bot starting {zdt_now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"[BOOT] US+LSE Gap-fill bot starting {zdt_now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print(f"[CONFIG] Gap range: {MAX_GAP*100:.2f}% to {MIN_GAP*100:.2f}%")
     print(f"[CONFIG] RSI max: {RSI_MAX}")
     print(f"[CONFIG] Total budget: £{TOTAL_BUDGET}")
@@ -266,7 +256,7 @@ def run_day():
     
     wait_until_open()
     
-    print(f"[START] US Market open! Beginning scan at {zdt_now().strftime('%H:%M:%S %Z')}")
+    print(f"[START] Market open! Beginning scan at {zdt_now().strftime('%H:%M:%S %Z')}")
 
     budget_each = TOTAL_BUDGET / max(1, len(UNIVERSE))
     spent = 0.0
@@ -283,7 +273,6 @@ def run_day():
         if not plan:
             continue
 
-        # Trim to budget cap
         max_affordable = math.floor((TOTAL_BUDGET - spent) / plan.entry)
         if max_affordable <= 0:
             print("[INFO] Budget cap hit; skipping remaining.")
@@ -298,7 +287,6 @@ def run_day():
             positions[plan.t212_ticker] = positions.get(plan.t212_ticker, 0) + qty
             spent += qty * plan.entry
             
-            # Place stop immediately
             time.sleep(1)
             try:
                 stop_resp = post_stop_order(plan.t212_ticker, qty, plan.stop)
@@ -310,11 +298,10 @@ def run_day():
             print(f"[ERROR] Order failed for {t}: {e}")
             continue
 
-        # Monitor for target
         print(f"[MONITOR] Watching {t} for target ${plan.target:.2f}...")
         monitor_start = time.time()
         
-        while is_market_open() and (time.time() - monitor_start) < 3600:  # 1 hour max
+        while is_market_open() and (time.time() - monitor_start) < 3600:
             try:
                 px = last_price_intraday(yf_symbol(plan.t212_ticker))
                 if px and px >= plan.target:
@@ -329,7 +316,6 @@ def run_day():
             
             time.sleep(45)
 
-    # End-of-day cleanup
     print(f"\n[EOD] End of day cleanup at {zdt_now().strftime('%H:%M:%S %Z')}")
     for t, q in list(positions.items()):
         if q > 0:
@@ -345,14 +331,13 @@ def run_day():
 
 def main():
     print("\n" + "#"*60)
-    print("# US Gap-Fill Trading Bot - Enhanced Version")
+    print("# US+LSE Gap-Fill Trading Bot")
     print("# Press Ctrl+C to stop")
     print("#"*60 + "\n")
     
     while True:
         try:
             run_day()
-            # After close, idle and loop next day
             while is_market_open():
                 time.sleep(60)
             print(f"\n[SLEEP] Market closed at {zdt_now().strftime('%H:%M:%S %Z')}. Sleeping 1 hour...")
