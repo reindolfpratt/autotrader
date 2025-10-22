@@ -121,10 +121,18 @@ def market_sell_all(ticker: str, qty: float):
 # Market data - MIXED US + LSE STOCKS
 # ──────────────────────────────────────────────────────────────────────────────
 def yf_symbol(ticker: str) -> str:
+    """Convert ticker to Yahoo Finance format"""
     LSE_TICKERS = {'RR', 'EQQQ', 'VUSA', 'VUAG', 'ISF', 'VUKE', 'VMID'}
     if ticker.upper() in LSE_TICKERS:
         return f"{ticker}.L"
     return ticker
+
+def t212_ticker(ticker: str) -> str:
+    """Convert ticker to Trading212 format"""
+    LSE_TICKERS = {'RR', 'EQQQ', 'VUSA', 'VUAG', 'ISF', 'VUKE', 'VMID'}
+    if ticker.upper() in LSE_TICKERS:
+        return f"{ticker}_EQ"
+    return f"{ticker}_US_EQ"
 
 def prev_close_and_rsi14(yf_sym: str):
     try:
@@ -188,43 +196,44 @@ def last_price_intraday(yf_sym: str) -> float | None:
 @dataclass
 class Plan:
     t212_ticker: str
+    yf_ticker: str
     entry: float
     target: float
     stop: float
     qty: int
 
-def make_plan(t212_ticker: str, budget_each: float) -> Plan | None:
-    yfs = yf_symbol(t212_ticker)
+def make_plan(ticker: str, budget_each: float) -> Plan | None:
+    yfs = yf_symbol(ticker)
     
     print(f"\n{'='*60}")
-    print(f"[SCAN] Analyzing {t212_ticker}...")
+    print(f"[SCAN] Analyzing {ticker}...")
     
     prev_close, rsi_yday = prev_close_and_rsi14(yfs)
     
     if prev_close is None or rsi_yday is None:
-        print(f"[SKIP] {t212_ticker}: Could not fetch historical data")
+        print(f"[SKIP] {ticker}: Could not fetch historical data")
         return None
     
-    print(f"[DATA] {t212_ticker}: Prev Close = ${prev_close:.2f}, RSI = {rsi_yday:.2f}")
+    print(f"[DATA] {ticker}: Prev Close = ${prev_close:.2f}, RSI = {rsi_yday:.2f}")
     
     open_px = get_actual_open_price(yfs, max_wait_minutes=3)
     
     if not open_px:
-        print(f"[SKIP] {t212_ticker}: No opening price available")
+        print(f"[SKIP] {ticker}: No opening price available")
         return None
 
     gap_pct = (open_px - prev_close) / prev_close
-    print(f"[GAP] {t212_ticker}: {gap_pct*100:.3f}% (Open: ${open_px:.2f})")
+    print(f"[GAP] {ticker}: {gap_pct*100:.3f}% (Open: ${open_px:.2f})")
     
     if not (MAX_GAP <= gap_pct <= MIN_GAP):
-        print(f"[SKIP] {t212_ticker}: Gap {gap_pct*100:.3f}% outside range [{MAX_GAP*100:.2f}%, {MIN_GAP*100:.2f}%]")
+        print(f"[SKIP] {ticker}: Gap {gap_pct*100:.3f}% outside range [{MAX_GAP*100:.2f}%, {MIN_GAP*100:.2f}%]")
         return None
     
     if rsi_yday > RSI_MAX:
-        print(f"[SKIP] {t212_ticker}: RSI {rsi_yday:.2f} > {RSI_MAX}")
+        print(f"[SKIP] {ticker}: RSI {rsi_yday:.2f} > {RSI_MAX}")
         return None
 
-    print(f"[PASS] {t212_ticker}: ✓ Gap and RSI filters passed!")
+    print(f"[PASS] {ticker}: ✓ Gap and RSI filters passed!")
     
     target = prev_close * (1 - SLIPPAGE_BP)
     stop = open_px * (1 - min(0.006, abs(gap_pct) * 0.6))
@@ -236,11 +245,13 @@ def make_plan(t212_ticker: str, budget_each: float) -> Plan | None:
     qty = int(max(0, min(by_risk, by_budget)))
     
     if qty <= 0:
-        print(f"[SKIP] {t212_ticker}: Qty = 0 (insufficient budget or risk cap)")
+        print(f"[SKIP] {ticker}: Qty = 0 (insufficient budget or risk cap)")
         return None
 
-    print(f"[PLAN] {t212_ticker}: Entry=${open_px:.2f}, Target=${target:.2f}, Stop=${stop:.2f}, Qty={qty}")
-    return Plan(t212_ticker, open_px, target, stop, qty)
+    t212_fmt = t212_ticker(ticker)
+    print(f"[PLAN] {ticker}: Entry=${open_px:.2f}, Target=${target:.2f}, Stop=${stop:.2f}, Qty={qty}")
+    print(f"[T212] Will use ticker format: {t212_fmt}")
+    return Plan(t212_fmt, yfs, open_px, target, stop, qty)
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Main loop
@@ -303,7 +314,7 @@ def run_day():
         
         while is_market_open() and (time.time() - monitor_start) < 3600:
             try:
-                px = last_price_intraday(yf_symbol(plan.t212_ticker))
+                px = last_price_intraday(plan.yf_ticker)
                 if px and px >= plan.target:
                     q = positions.get(plan.t212_ticker, 0)
                     if q > 0:
