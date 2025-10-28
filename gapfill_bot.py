@@ -20,7 +20,7 @@ API_SECRET = os.getenv("T212_API_SECRET")
 ACCOUNT_CCY = os.getenv("ACCOUNT_CURRENCY", "GBP")
 
 UNIVERSE = [t.strip().upper() for t in os.getenv("TICKERS", "TSLA,GME,AMC,COIN,AAPL,NVDA,AMD,BABA,PLTR,RR,ACHR,EQQQ").split(",")]
-TOTAL_BUDGET = float(os.getenv("TOTAL_BUDGET_GBP", "2000"))
+TOTAL_BUDGET = float(os.getenv("TOTAL_BUDGET_GBP", "100"))
 PER_TRADE_RISK = float(os.getenv("PER_TRADE_RISK_PCT", "0.005"))
 
 MIN_GAP = float(os.getenv("MIN_GAP_DOWN", "-0.005"))
