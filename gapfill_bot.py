@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 # ──────────────────────────────────────────────────────────────────────────────
 load_dotenv()
 
-BASE = os.getenv("T212_BASE_URL", "https://demo.trading212.com/api/v0").rstrip("/")
+BASE = os.getenv("T212_BASE_URL", "https://live.trading212.com/api/v0").rstrip("/")
 API_KEY = os.getenv("T212_API_KEY")
 API_SECRET = os.getenv("T212_API_SECRET")
 ACCOUNT_CCY = os.getenv("ACCOUNT_CURRENCY", "GBP")
