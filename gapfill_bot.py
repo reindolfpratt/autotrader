@@ -1,3 +1,5 @@
+import os
+print("ENV BUDGET:", os.environ.get("BUDGET"))
 import os, math, base64, random, time
 import datetime as dt
 from dataclasses import dataclass
