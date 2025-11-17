@@ -15,9 +15,7 @@ from dotenv import load_dotenv
 
 print("ENV BUDGET:", os.environ.get("TOTAL_BUDGET_GBP"))
 
-# ──────────────────────
-# Config
-# ──────────────────────
+# ───── Config ─────
 load_dotenv()
 
 BASE = os.getenv("T212_BASE_URL", "https://live.trading212.com/api/v0").rstrip("/")
@@ -103,20 +101,19 @@ def get_cash_gbp() -> float:
     r = t212_request("GET", "/equity/account/cash")
     return float(r.json().get("free", 0.0))
 
-def post_market_order(instrument_code: str, qty: float):
-    payload = {"instrumentCode": instrument_code, "quantity": round(qty, 6), "timeValidity": "DAY"}
-    print(f"[DEBUG] Order payload for {instrument_code}:", payload)
+def post_market_order(ticker_code: str, qty: float):
+    payload = {"ticker": ticker_code, "quantity": round(qty, 6), "type": "MARKET"}
+    print(f"[DEBUG] Order payload for {ticker_code}:", payload)
     r = t212_request("POST", "/equity/orders/market", json=payload)
     return r.json()
 
-def post_stop_order(instrument_code: str, qty_to_sell: float, stop_price: float):
-    payload = {"instrumentCode": instrument_code, "quantity": -abs(round(qty_to_sell, 6)),
-               "stopPrice": round(stop_price, 4), "timeValidity": "DAY"}
+def post_stop_order(ticker_code: str, qty_to_sell: float, stop_price: float):
+    payload = {"ticker": ticker_code, "quantity": -abs(round(qty_to_sell, 6)), "stopPrice": round(stop_price, 4), "type": "STOP"}
     r = t212_request("POST", "/equity/orders/stop", json=payload)
     return r.json()
 
-def market_sell_all(instrument_code: str, qty: float):
-    payload = {"instrumentCode": instrument_code, "quantity": -abs(round(qty, 6)), "timeValidity": "DAY"}
+def market_sell_all(ticker_code: str, qty: float):
+    payload = {"ticker": ticker_code, "quantity": -abs(round(qty, 6)), "type": "MARKET"}
     r = t212_request("POST", "/equity/orders/market", json=payload)
     return r.json()
 
@@ -131,17 +128,13 @@ def prev_close_and_rsi14(yf_sym: str):
         df = yf.download(yf_sym, period="3mo", interval="1d", auto_adjust=False, progress=False)
         if df.empty or len(df) < 20:
             return None, None
-        
         now_hour = zdt_now().hour
         if now_hour < 17:
             df = df[:-1]
-        
         if len(df) < 15:
             return None, None
-            
         close = df["Close"]
         prev_close = float(close.iloc[-1])
-        
         delta = close.diff()
         up = delta.copy()
         down = delta.copy()
@@ -184,7 +177,7 @@ def last_price_intraday(yf_sym: str) -> float | None:
 
 @dataclass
 class Plan:
-    instrument_code: str
+    ticker_code: str
     yf_ticker: str
     entry: float
     target: float
@@ -223,10 +216,10 @@ def make_plan(ticker: str, budget_each: float) -> Plan | None:
     if qty <= 0:
         print(f"[SKIP] {ticker}: Qty = 0 (insufficient budget or risk cap)")
         return None
-    instrument_code = T212_CODES.get(ticker, ticker)
+    ticker_code = T212_CODES.get(ticker, ticker)
     print(f"[PLAN] {ticker}: Entry=${open_px:.2f}, Target=${target:.2f}, Stop=${stop:.2f}, Qty={qty}")
-    print(f"[T212] Will use instrument code: {instrument_code}")
-    return Plan(instrument_code, yfs, open_px, target, stop, qty)
+    print(f"[T212] Will use ticker code: {ticker_code}")
+    return Plan(ticker_code, yfs, open_px, target, stop, qty)
 
 def run_day():
     print("\n" + "="*60)
@@ -257,13 +250,13 @@ def run_day():
         qty = min(plan.qty, max_affordable)
         try:
             print(f"\n[BUY] {t} → Market order for {qty} shares @ ≈${plan.entry:.2f}")
-            resp = post_market_order(plan.instrument_code, qty)
+            resp = post_market_order(plan.ticker_code, qty)
             print(f"[ORDER] Response: {resp}")
-            positions[plan.instrument_code] = positions.get(plan.instrument_code, 0) + qty
+            positions[plan.ticker_code] = positions.get(plan.ticker_code, 0) + qty
             spent += qty * plan.entry
             time.sleep(1)
             try:
-                stop_resp = post_stop_order(plan.instrument_code, qty, plan.stop)
+                stop_resp = post_stop_order(plan.ticker_code, qty, plan.stop)
                 print(f"[STOP] Placed @ ${plan.stop:.2f} - Response: {stop_resp}")
             except Exception as e:
                 print(f"[WARN] Stop placement failed: {e}")
@@ -280,11 +273,11 @@ def run_day():
             try:
                 px = last_price_intraday(plan.yf_ticker)
                 if px and px >= plan.target:
-                    q = positions.get(plan.instrument_code, 0)
+                    q = positions.get(plan.ticker_code, 0)
                     if q > 0:
                         print(f"[TARGET] {t} hit ${px:.2f} ≥ ${plan.target:.2f} → Selling {q} shares")
-                        market_sell_all(plan.instrument_code, q)
-                        positions[plan.instrument_code] = 0
+                        market_sell_all(plan.ticker_code, q)
+                        positions[plan.ticker_code] = 0
                     break
             except Exception as e:
                 print(f"[WARN] Monitor error for {t}: {e}")
