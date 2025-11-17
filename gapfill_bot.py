@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 print("ENV BUDGET:", os.environ.get("TOTAL_BUDGET_GBP"))
 
 # ──────────────────────
-# Config - US + LSE STOCKS VERSION
+# Config
 # ──────────────────────
 load_dotenv()
 
@@ -38,6 +38,8 @@ TZ = os.getenv("TIMEZONE", "America/New_York")
 OPEN_HHMM = os.getenv("US_OPEN_HHMM", "09:30")
 CLOSE_HHMM = os.getenv("US_CLOSE_HHMM", "16:00")
 
+T212_CODES = {kv.split("=")[0]:kv.split("=")[1] for kv in os.getenv("T212_CODES","").split(",") if "=" in kv}
+
 def parse_hhmm(s: str) -> dt.time:
     hh, mm = s.split(":")
     return dt.time(int(hh), int(mm))
@@ -47,9 +49,6 @@ CLOSE_T = parse_hhmm(CLOSE_HHMM)
 
 positions: dict[str, int] = {}
 
-# ──────────────────────
-# Time helpers
-# ──────────────────────
 def zdt_now():
     return dt.datetime.now(pytz.timezone(TZ))
 
@@ -72,9 +71,6 @@ def wait_until_open():
         print(f"[WAIT] Market closed. Sleeping {sleep_s:.0f}s…")
         time.sleep(sleep_s)
 
-# ──────────────────────
-# Trading 212 API wrapper
-# ──────────────────────
 def auth_header() -> dict:
     assert API_KEY and API_SECRET, "Missing T212 API creds in .env"
     token = base64.b64encode(f"{API_KEY}:{API_SECRET}".encode()).decode()
@@ -107,39 +103,28 @@ def get_cash_gbp() -> float:
     r = t212_request("GET", "/equity/account/cash")
     return float(r.json().get("free", 0.0))
 
-def post_market_order(ticker: str, qty: float):
-    payload = {"ticker": ticker, "quantity": round(qty, 6), "timeValidity": "DAY"}
-    print(f"[DEBUG] Order payload for {ticker}:", payload)
+def post_market_order(instrument_code: str, qty: float):
+    payload = {"instrumentCode": instrument_code, "quantity": round(qty, 6), "timeValidity": "DAY"}
+    print(f"[DEBUG] Order payload for {instrument_code}:", payload)
     r = t212_request("POST", "/equity/orders/market", json=payload)
     return r.json()
 
-def post_stop_order(ticker: str, qty_to_sell: float, stop_price: float):
-    payload = {"ticker": ticker, "quantity": -abs(round(qty_to_sell, 6)),
+def post_stop_order(instrument_code: str, qty_to_sell: float, stop_price: float):
+    payload = {"instrumentCode": instrument_code, "quantity": -abs(round(qty_to_sell, 6)),
                "stopPrice": round(stop_price, 4), "timeValidity": "DAY"}
     r = t212_request("POST", "/equity/orders/stop", json=payload)
     return r.json()
 
-def market_sell_all(ticker: str, qty: float):
-    payload = {"ticker": ticker, "quantity": -abs(round(qty, 6)), "timeValidity": "DAY"}
+def market_sell_all(instrument_code: str, qty: float):
+    payload = {"instrumentCode": instrument_code, "quantity": -abs(round(qty, 6)), "timeValidity": "DAY"}
     r = t212_request("POST", "/equity/orders/market", json=payload)
     return r.json()
 
-# ──────────────────────
-# Market data - MIXED US + LSE STOCKS
-# ──────────────────────
 def yf_symbol(ticker: str) -> str:
-    """Convert ticker to Yahoo Finance format"""
     LSE_TICKERS = {'RR', 'EQQQ', 'VUSA', 'VUAG', 'ISF', 'VUKE', 'VMID'}
     if ticker.upper() in LSE_TICKERS:
         return f"{ticker}.L"
     return ticker
-
-def t212_ticker(ticker: str) -> str:
-    """Convert ticker to Trading212 format"""
-    LSE_TICKERS = {'RR', 'EQQQ', 'VUSA', 'VUAG', 'ISF', 'VUKE', 'VMID'}
-    if ticker.upper() in LSE_TICKERS:
-        return f"{ticker}_EQ"
-    return f"{ticker}_US_EQ"
 
 def prev_close_and_rsi14(yf_sym: str):
     try:
@@ -168,7 +153,6 @@ def prev_close_and_rsi14(yf_sym: str):
         rs = roll_up / roll_down
         rsi = 100 - (100 / (1 + rs))
         rsi_yday = float(rsi.iloc[-1])
-        
         return prev_close, rsi_yday
     except Exception as e:
         print(f"[ERROR] prev_close_and_rsi14 for {yf_sym}: {e}")
@@ -184,11 +168,9 @@ def get_actual_open_price(yf_sym: str, max_wait_minutes: int = 5) -> float | Non
                 return open_price
         except Exception as e:
             print(f"[WARN] get_actual_open_price attempt {attempt+1}: {e}")
-        
         if attempt < max_wait_minutes - 1:
             print(f"[WAIT] Waiting for {yf_sym} opening data... ({attempt+1}/{max_wait_minutes})")
             time.sleep(60)
-    
     return None
 
 def last_price_intraday(yf_sym: str) -> float | None:
@@ -202,7 +184,7 @@ def last_price_intraday(yf_sym: str) -> float | None:
 
 @dataclass
 class Plan:
-    t212_ticker: str
+    instrument_code: str
     yf_ticker: str
     entry: float
     target: float
@@ -211,58 +193,41 @@ class Plan:
 
 def make_plan(ticker: str, budget_each: float) -> Plan | None:
     yfs = yf_symbol(ticker)
-    
     print(f"\n{'='*60}")
     print(f"[SCAN] Analyzing {ticker}...")
-    
     prev_close, rsi_yday = prev_close_and_rsi14(yfs)
-    
     if prev_close is None or rsi_yday is None:
         print(f"[SKIP] {ticker}: Could not fetch historical data")
         return None
-    
     print(f"[DATA] {ticker}: Prev Close = ${prev_close:.2f}, RSI = {rsi_yday:.2f}")
-    
     open_px = get_actual_open_price(yfs, max_wait_minutes=3)
-    
     if not open_px:
         print(f"[SKIP] {ticker}: No opening price available")
         return None
-
     gap_pct = (open_px - prev_close) / prev_close
     print(f"[GAP] {ticker}: {gap_pct*100:.3f}% (Open: ${open_px:.2f})")
-    
     if not (MAX_GAP <= gap_pct <= MIN_GAP):
         print(f"[SKIP] {ticker}: Gap {gap_pct*100:.3f}% outside range [{MAX_GAP*100:.2f}%, {MIN_GAP*100:.2f}%]")
         return None
-    
     if rsi_yday > RSI_MAX:
         print(f"[SKIP] {ticker}: RSI {rsi_yday:.2f} > {RSI_MAX}")
         return None
-
     print(f"[PASS] {ticker}: ✓ Gap and RSI filters passed!")
-    
     target = prev_close * (1 - SLIPPAGE_BP)
     stop = open_px * (1 - min(0.006, abs(gap_pct) * 0.6))
-
     risk_per_share = max(open_px - stop, open_px * 0.002)
     max_risk_cap = get_cash_gbp() * PER_TRADE_RISK
     by_risk = math.floor(max_risk_cap / risk_per_share)
     by_budget = math.floor(budget_each / open_px)
     qty = int(max(0, min(by_risk, by_budget)))
-    
     if qty <= 0:
         print(f"[SKIP] {ticker}: Qty = 0 (insufficient budget or risk cap)")
         return None
-
-    t212_fmt = t212_ticker(ticker)
+    instrument_code = T212_CODES.get(ticker, ticker)
     print(f"[PLAN] {ticker}: Entry=${open_px:.2f}, Target=${target:.2f}, Stop=${stop:.2f}, Qty={qty}")
-    print(f"[T212] Will use ticker format: {t212_fmt}")
-    return Plan(t212_fmt, yfs, open_px, target, stop, qty)
+    print(f"[T212] Will use instrument code: {instrument_code}")
+    return Plan(instrument_code, yfs, open_px, target, stop, qty)
 
-# ──────────────────────
-# Main loop
-# ──────────────────────
 def run_day():
     print("\n" + "="*60)
     print(f"[BOOT] US+LSE Gap-fill bot starting {zdt_now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
@@ -271,14 +236,10 @@ def run_day():
     print(f"[CONFIG] Total budget: £{TOTAL_BUDGET}")
     print(f"[CONFIG] Universe: {', '.join(UNIVERSE)}")
     print("="*60)
-    
     wait_until_open()
-    
     print(f"[START] Market open! Beginning scan at {zdt_now().strftime('%H:%M:%S %Z')}")
-
     budget_each = TOTAL_BUDGET / max(1, len(UNIVERSE))
     spent = 0.0
-
     for t in UNIVERSE:
         if not is_market_open():
             print("[INFO] Market closed during scan.")
@@ -286,32 +247,26 @@ def run_day():
         if spent >= TOTAL_BUDGET:
             print("[INFO] Budget fully allocated.")
             break
-
         plan = make_plan(t, budget_each)
         if not plan:
             continue
-
         max_affordable = math.floor((TOTAL_BUDGET - spent) / plan.entry)
         if max_affordable <= 0:
             print("[INFO] Budget cap hit; skipping remaining.")
             break
         qty = min(plan.qty, max_affordable)
-
         try:
             print(f"\n[BUY] {t} → Market order for {qty} shares @ ≈${plan.entry:.2f}")
-            resp = post_market_order(plan.t212_ticker, qty)
+            resp = post_market_order(plan.instrument_code, qty)
             print(f"[ORDER] Response: {resp}")
-            
-            positions[plan.t212_ticker] = positions.get(plan.t212_ticker, 0) + qty
+            positions[plan.instrument_code] = positions.get(plan.instrument_code, 0) + qty
             spent += qty * plan.entry
-            
             time.sleep(1)
             try:
-                stop_resp = post_stop_order(plan.t212_ticker, qty, plan.stop)
+                stop_resp = post_stop_order(plan.instrument_code, qty, plan.stop)
                 print(f"[STOP] Placed @ ${plan.stop:.2f} - Response: {stop_resp}")
             except Exception as e:
                 print(f"[WARN] Stop placement failed: {e}")
-            
         except Exception as e:
             print(f"[ERROR] Order failed for {t}: {e}")
             import traceback
@@ -319,25 +274,21 @@ def run_day():
             if hasattr(e, 'response') and hasattr(e.response, 'text'):
                 print("API Error Response:", e.response.text)
             continue
-
         print(f"[MONITOR] Watching {t} for target ${plan.target:.2f}...")
         monitor_start = time.time()
-        
         while is_market_open() and (time.time() - monitor_start) < 3600:
             try:
                 px = last_price_intraday(plan.yf_ticker)
                 if px and px >= plan.target:
-                    q = positions.get(plan.t212_ticker, 0)
+                    q = positions.get(plan.instrument_code, 0)
                     if q > 0:
                         print(f"[TARGET] {t} hit ${px:.2f} ≥ ${plan.target:.2f} → Selling {q} shares")
-                        market_sell_all(plan.t212_ticker, q)
-                        positions[plan.t212_ticker] = 0
+                        market_sell_all(plan.instrument_code, q)
+                        positions[plan.instrument_code] = 0
                     break
             except Exception as e:
                 print(f"[WARN] Monitor error for {t}: {e}")
-            
             time.sleep(45)
-
     print(f"\n[EOD] End of day cleanup at {zdt_now().strftime('%H:%M:%S %Z')}")
     for t, q in list(positions.items()):
         if q > 0:
@@ -348,7 +299,6 @@ def run_day():
                 time.sleep(1)
             except Exception as e:
                 print(f"[ERROR] EOD close failed for {t}: {e}")
-
     print(f"[DONE] Trading day complete. Total spent: £{spent:.2f}")
 
 def main():
@@ -356,7 +306,6 @@ def main():
     print("# US+LSE Gap-Fill Trading Bot")
     print("# Press Ctrl+C to stop")
     print("#"*60 + "\n")
-    
     while True:
         try:
             run_day()
