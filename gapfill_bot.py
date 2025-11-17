@@ -166,8 +166,13 @@ def prev_close_and_rsi14(yf_sym: str):
         
         return prev_close, rsi_yday
     except Exception as e:
-        print(f"[ERROR] prev_close_and_rsi14 for {yf_sym}: {e}")
-        return None, None
+    print(f"[ERROR] Order failed for {t}: {e}")
+    import traceback
+    traceback.print_exc()  # This shows Python's entire error trace.
+    # Print the error response if it's an HTTPError
+    if hasattr(e, 'response') and hasattr(e.response, 'text'):
+        print("API Error Response:", e.response.text)
+    continue
 
 def get_actual_open_price(yf_sym: str, max_wait_minutes: int = 5) -> float | None:
     for attempt in range(max_wait_minutes):
