@@ -109,6 +109,7 @@ def get_cash_gbp() -> float:
 
 def post_market_order(ticker: str, qty: float):
     payload = {"ticker": ticker, "quantity": round(qty, 6), "timeValidity": "DAY"}
+    print(f"[DEBUG] Order payload for {ticker}:", payload)
     r = t212_request("POST", "/equity/orders/market", json=payload)
     return r.json()
 
